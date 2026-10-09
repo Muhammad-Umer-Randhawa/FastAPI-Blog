@@ -1,37 +1,38 @@
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, Request, HTTPException, status, Depends # FastAPI is the main class that we use to create our application. Request is used to access the incoming request data. HTTPException is used to raise HTTP exceptions with specific status codes and messages. status is a module that provides constants for HTTP status codes. Depends is used for dependency injection, allowing us to define dependencies for our endpoints.
 from fastapi.exceptions import RequestValidationError # for handling validation error like when someone passes hello instead of an integer when we are expecting an integer
 from fastapi.responses import JSONResponse # to manually return JSON responses from our endpoints, especially in error handling scenarios.
 from starlette.exceptions import HTTPException as StarletteHTTPException 
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from schemas import PostResponse, PostCreate # importing the pydantic models we created in schemas.py
+
+from schemas import PostResponse, PostCreate, UserCreate, UserResponse # importing the pydantic models we created in schemas.py
+
+from typing import Annotated
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+import models # Gives access to our post and user models
+from database import Base, engine, get_db # Base and engine are for creating tables and get_db is our dependency function that provides database sessions
+
 
 # Pydantic: It is a data validation and settings management library for Python, based on Python type annotations/ type hints. It is used in FastAPI to define data models and validate incoming request data.
+# Data flow is like this: Arequest comes in, pydantic validates it, SQLAlchemy stores or  retrieves the dats, pydantic formats the repsonse and the response goes out. There are clear boundries between eachother
+
+Base.metadata.create_all(bind=engine) # This looks at all of our models from base and creates the tables if they dont already exist. It is idempotent, which means its safe to run multiple times and if that laready exist then nothing owuld happen, and it happens on app startup.
+
+
 
 app = FastAPI() 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory = "templates")
 
 # this 'app' object is used to define all of our routes and configurations for the
 # FastAPI application. It serves as the main entry point for the application, allowing
 # us to define endpoints, middleware, and other settings.
 
-posts: list[dict] = [
-    {
-        "id": 1,
-        "author": "John Doe",
-        "title": "FastAPI is Awesome",
-        "content": "This framework is really easy to use and super fast.",
-        "date_posted": "April 20, 2025",
-    },
-    {
-        "id": 2,
-        "author": "Jane Doe",
-        "title": "Python is Great for Web Development",
-        "content": "Python is a great language for web development, and FastAPI makes it even better.",
-        "date_posted": "April 21, 2025",
-    },
-]
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+app.mount("/media", StaticFiles(directory="media"), name="media")
+
+templates = Jinja2Templates(directory = "templates")
 
 # General pattern: server-side rendering (SSR)
 # 1. Route function gathers/builds data (e.g. the 'posts' list)
@@ -39,31 +40,125 @@ posts: list[dict] = [
 # 3. Final HTML (not raw data) is sent back to the browser
 # Same pattern exists in Flask, Django, Express, Rails, etc. — just different syntax.
 
-@app.get("/", include_in_schema=False, name = "home") # A decorator that defines a GET endpoint at the root URL ("/"). When a client sends a GET request to this URL, the associated function will be executed.
-@app.get("/posts", include_in_schema=False, name = "posts") # the route still works in the browser but it wont appear in the api documentation if we used 'include_in_schema = False'
-def home(request: Request):
+@app.get("/", include_in_schema=False, name="home")
+@app.get("/posts", include_in_schema=False, name="posts")
+def home(request: Request, db: Annotated[Session, Depends(get_db)]):
+    result = db.execute(select(models.Post))
+    posts = result.scalars().all()
     return templates.TemplateResponse(
-        request, 
-        "home.html", 
+        request,
+        "home.html",
         {"posts": posts, "title": "Home"},
-    ) 
-# This line renders the "home.html" template and injects the 'posts' list into it. The 'request' object is also passed to the template, which is necessary for Jinja2 to function properly.
-@app.get("/posts/{post_id}", include_in_schema=False, name = "post") 
-def post_page(request: Request, post_id: int): 
-    for post in posts:
-        if post.get("id") == post_id:
-            title = post["title"][:100]
-            return templates.TemplateResponse(
-                request, 
-                "post.html", 
-                {"post": post, "title": title},
-            )
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Post with id {post_id} not found",
     )
-@app.get("/api/posts", response_model=list[PostResponse])  # A decorator that defines a GET endpoint at the URL "/api/posts". When a client sends a GET request to this URL, the associated function will be executed. The response_model parameter specifies that the response will be a list of PostResponse objects.
-def get_posts(): # this is an api endpoint that returns a list of all posts. The response_model parameter in the decorator specifies that the response will be a list of PostResponse objects, which is a Pydantic model defined in schemas.py. This means that FastAPI will automatically validate and serialize the response data to match the PostResponse model.
+
+# This line renders the "home.html" template and injects the 'posts' list into it. The 'request' object is also passed to the template, which is necessary for Jinja2 to function properly.
+
+@app.get("/posts/{post_id}", include_in_schema=False, name="post_page")
+def post_page(request: Request, post_id: int, db: Annotated[Session, Depends(get_db)]):
+    result = db.execute(select(models.Post).where(models.Post.id == post_id))
+    post = result.scalars().first()
+    if post:
+        title = post.title[:50]
+        return templates.TemplateResponse(
+            request,
+            "post.html",
+            {"post": post, "title": title},
+        )
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found") 
+
+@app.get("/users/{user_id}/posts", include_in_schema=False, name="user_posts")
+def user_posts_page(
+    request: Request,
+    user_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    result = db.execute(select(models.User).where(models.User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    result = db.execute(select(models.Post).where(models.Post.user_id == user_id))
+    posts = result.scalars().all()
+    return templates.TemplateResponse(
+        request,
+        "user_posts.html",
+        {"posts": posts, "user": user, "title": f"{user.username}'s Posts"},
+    )
+
+@app.post( 
+    "/api/users",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+
+def create_user(user: UserCreate, db: Annotated[Session, Depends(get_db)]): # This tells FastAPI that before running this function call get_db and pass the result as the db parametrer here. get_db from our satabase.py file creates a session and yields it.
+    result = db.execute(
+        select(models.User).where(models.User.username == user.username),
+    )
+    existing_user = result.scalars().first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail = "Username already exists",
+        )
+
+
+    result = db.execute(
+            select(models.User).where(models.User.email == user.email),
+        )
+    existing_email = result.scalars().first()
+
+    if existing_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail = "Email already exists",
+        )
+
+    new_user = models.User(
+        username = user.username,
+        email = user.email,
+    )
+
+    db.add(new_user) # Stagers the insert
+    db.commit() # It executes the insert and saves it to the db
+    db.refresh(new_user) # Reloads the object from the db
+
+    return new_user
+
+@app.get("/api/users/{user_id}", response_model=UserResponse)  # A decorator that defines a GET endpoint at the URL "/api/posts/{post_id}". When a client sends a GET request to this URL, the associated function will be executed.
+def get_user(user_id: int, db: Annotated[Session, Depends(get_db)]): # gets the user by injecting the db to get the database session
+    result = db.execute(
+        select(models.User).where(models.User.id == user_id),
+    )
+    user = result.scalars().first()
+    if user:
+        return user
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+@app.get("/api/users/{user_id}/posts", response_model=list[PostResponse])
+def get_user_posts(user_id: int, db: Annotated[Session, Depends(get_db)]): # Gets the posts belonging to a user
+    result = db.execute(select(models.User).where(models.User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    result = db.execute(select(models.Post).where(models.Post.user_id == user_id))
+    posts = result.scalars().all()
+    return posts
+
+
+
+@app.get("/api/posts", response_model=list[PostResponse]) # A decorator that defines a GET endpoint at the URL "/api/posts". When a client sends a GET request to this URL, the associated function will be executed. The response_model parameter specifies that the response will be a list of PostResponse objects.
+def get_posts(db: Annotated[Session, Depends(get_db)]): # this is an api endpoint that returns a list of all posts. The response_model parameter in the decorator specifies that the response will be a list of PostResponse objects, which is a Pydantic model defined in schemas.py. This means that FastAPI will automatically validate and serialize the response data to match the PostResponse model.
+    result = db.execute(select(models.Post))
+    posts = result.scalars().all()
     return posts
 
 @app.post( # A post request is what we use to create resources. In this case, we are creating a new post. The decorator defines a POST endpoint at the URL
@@ -71,26 +166,35 @@ def get_posts(): # this is an api endpoint that returns a list of all posts. The
     response_model=PostResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_post(post: PostCreate):
-    new_id = max(p["id"] for p in posts) + 1 if posts else 1
-    new_post = {
-        "id": new_id,
-        "author": post.author,
-        "title": post.title,
-        "content": post.content,
-        "date_posted": "April 23, 2025",
-    }
-    posts.append(new_post)
+
+def create_post(post: PostCreate, db: Annotated[Session, Depends(get_db)]):
+    result = db.execute(select(models.User).where(models.User.id == post.user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    new_post = models.Post(
+        title=post.title,
+        content=post.content,
+        user_id=post.user_id,
+    )
+    db.add(new_post)
+    db.commit()
+    db.refresh(new_post)
     return new_post
 
 @app.get("/api/posts/{post_id}", response_model=PostResponse)  # A decorator that defines a GET endpoint at the URL "/api/posts/{post_id}". When a client sends a GET request to this URL, the associated function will be executed.
-def get_post(post_id: int): # this is an api endpoint that returns a single post based on the provided post_id. The post_id is extracted from the URL and passed as an argument to the function.
-    for post in posts:
-        if post.get("id") == post_id:
-            return post
+def get_post(post_id: int, db: Annotated[Session, Depends(get_db)]): # this is an api endpoint that returns a single post based on the provided post_id. The post_id is extracted from the URL and passed as an argument to the function.
+    result = db.execute(select(models.Post).where(models.Post.id == post_id))
+    post = result.scalars().first()
+    if post:
+        return post
     raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Post with id {post_id} not found",
+        status_code=status.HTTP_404_NOT_FOUND, 
+        detail="Post not found",
     )
 
 @app.exception_handler(StarletteHTTPException)
