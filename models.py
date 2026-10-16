@@ -12,7 +12,7 @@ class User(Base):
     email:Mapped[str] = mapped_column(String(120), unique=True, nullable=False) # The email column is a string that is unique and cannot be null. This means that each user must have a unique email address, and it cannot be left empty.
     image_file: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None) # The image_file column is a string that can be null. This means that each user can have an optional profile image, and it can be left empty. The default value is None, which means that if no value is provided, it will be set to None.
 
-    posts: Mapped[list[Post]] = relationship(back_populates="author") 
+    posts: Mapped[list[Post]] = relationship(back_populates="author", cascade="all, delete-orphan") 
     
     # This is a relationship and this creates a one to many relationship here. 
     # This means that one user can have many posts. The back_populates argument specifies the 

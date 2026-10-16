@@ -5,7 +5,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from schemas import PostResponse, PostCreate, UserCreate, UserResponse # importing the pydantic models we created in schemas.py
+from schemas import PostResponse, PostCreate, PostUpdate, UserCreate, UserResponse, UserUpdate # importing the pydantic models we created in schemas.py
 
 from typing import Annotated
 from sqlalchemy import select
@@ -17,7 +17,8 @@ from database import Base, engine, get_db # Base and engine are for creating tab
 
 # Pydantic: It is a data validation and settings management library for Python, based on Python type annotations/ type hints. It is used in FastAPI to define data models and validate incoming request data.
 # Data flow is like this: Arequest comes in, pydantic validates it, SQLAlchemy stores or  retrieves the dats, pydantic formats the repsonse and the response goes out. There are clear boundries between eachother
-
+# PUT: Full replacement. with that you send all the fields for that resource, replacing a record with a new version of that recrod.
+# PATCH: is for partial updates, with that you only send what is changed if you only want to update a post for eg.
 Base.metadata.create_all(bind=engine) # This looks at all of our models from base and creates the tables if they dont already exist. It is idempotent, which means its safe to run multiple times and if that laready exist then nothing owuld happen, and it happens on app startup.
 
 
@@ -153,8 +154,68 @@ def get_user_posts(user_id: int, db: Annotated[Session, Depends(get_db)]): # Get
     posts = result.scalars().all()
     return posts
 
+## update_user
+@app.patch("/api/users/{user_id}", response_model=UserResponse)
+def update_user(
+    user_id: int,
+    user_update: UserUpdate,
+    db: Annotated[Session, Depends(get_db)],
+):
+    result = db.execute(select(models.User).where(models.User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
 
+    if user_update.username is not None and user_update.username != user.username:
+        result = db.execute(
+            select(models.User).where(models.User.username == user_update.username),
+        )
+        existing_user = result.scalars().first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already exists",
+            )
 
+    if user_update.email is not None and user_update.email != user.email:
+        result = db.execute(
+            select(models.User).where(models.User.email == user_update.email),
+        )
+        existing_email = result.scalars().first()
+        if existing_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+
+    if user_update.username is not None:
+        user.username = user_update.username
+    if user_update.email is not None:
+        user.email = user_update.email
+    if user_update.image_file is not None:
+        user.image_file = user_update.image_file
+
+    db.commit()
+    db.refresh(user)
+    return user
+
+## delete_user
+@app.delete("/api/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(user_id: int, db: Annotated[Session, Depends(get_db)]):
+    result = db.execute(select(models.User).where(models.User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    db.delete(user)
+    db.commit()
+    
 @app.get("/api/posts", response_model=list[PostResponse]) # A decorator that defines a GET endpoint at the URL "/api/posts". When a client sends a GET request to this URL, the associated function will be executed. The response_model parameter specifies that the response will be a list of PostResponse objects.
 def get_posts(db: Annotated[Session, Depends(get_db)]): # this is an api endpoint that returns a list of all posts. The response_model parameter in the decorator specifies that the response will be a list of PostResponse objects, which is a Pydantic model defined in schemas.py. This means that FastAPI will automatically validate and serialize the response data to match the PostResponse model.
     result = db.execute(select(models.Post))
@@ -175,7 +236,6 @@ def create_post(post: PostCreate, db: Annotated[Session, Depends(get_db)]):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-
     new_post = models.Post(
         title=post.title,
         content=post.content,
@@ -196,6 +256,65 @@ def get_post(post_id: int, db: Annotated[Session, Depends(get_db)]): # this is a
         status_code=status.HTTP_404_NOT_FOUND, 
         detail="Post not found",
     )
+
+@app.put("/api/posts/{post_id}", response_model=PostResponse)
+def update_post_full(post_id: int, post_data: PostCreate, db: Annotated[Session, Depends(get_db)],): # This is what will contain the data from the request body when someone is attempting to update a post.
+    result = db.execute(select(models.Post).where(models.Post.id == post_id))
+    post = result.scalars().first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Post not found",
+        )
+    # Now we add the update logic but before we update the user_id, we should check if the new user actually exists, it would give an error than letting the databse contraint fail
+    # we only do this check if the client sent a different user than what is already on the post.
+    if post_data.user_id != post.user_id:
+        result = db.execute(select(models.User).where(models.User.id == post_data.user_id))
+        user = result.scalars().first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+    post.title = post_data.title
+    post.content = post_data.content
+    post.user_id = post_data.user_id
+
+    db.commit()
+    db.refresh(post)
+    return post
+
+@app.patch("/api/posts/{post_id}", response_model=PostResponse)
+def update_post_partial(post_id: int, post_data: PostUpdate, db: Annotated[Session, Depends(get_db)],): # This is what will contain the data from the request body when someone is attempting to update a post.
+    result = db.execute(select(models.Post).where(models.Post.id == post_id))
+    post = result.scalars().first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Post not found",
+        )
+    # We only want to update fields that client actually sent, we dont want to override missing fields with none
+
+    update_data = post_data.model_dump(exclude_unset = True) # without this, if the client sends some fields and not all, pydantic would use the default values for the unsent fields.
+    for field , value in update_data.items():
+        setattr(post, field, value) 
+
+    db.commit()
+    db.refresh(post)
+    return post
+
+@app.delete("/api/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)  
+def delete_post(post_id: int, db: Annotated[Session, Depends(get_db)]):  
+    result = db.execute(select(models.Post).where(models.Post.id == post_id))
+    post = result.scalars().first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Post not found",
+        )
+    db.delete(post)
+    db.commit()
+
 
 @app.exception_handler(StarletteHTTPException)
 def general_http_exception_handler(request: Request, exception: StarletteHTTPException):
