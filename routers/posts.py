@@ -16,6 +16,7 @@ async def get_posts(db: Annotated[AsyncSession, Depends(get_db)]): # this is an 
     result = await db.execute(
         select(models.Post)
         .options(selectinload(models.Post.author))
+        .order_by(models.Post.date_posted.desc()),
     )
     posts = result.scalars().all()
     return posts
@@ -102,6 +103,7 @@ async def update_post_partial(post_id: int, post_data: PostUpdate, db: Annotated
 
     await db.commit()
     await db.refresh(post)
+    await db.refresh(post, attribute_names=["author"])
     return post
 
 @router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)  

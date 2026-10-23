@@ -59,7 +59,11 @@ app.include_router(posts.router, prefix="/api/posts", tags=["posts"])
 @app.get("/", include_in_schema=False, name="home")
 @app.get("/posts", include_in_schema=False, name="posts")
 async def home(request: Request, db: Annotated[AsyncSession, Depends(get_db)]): 
-    result = await db.execute(select(models.Post).options(selectinload(models.Post.author)),) # selectinload enforces eager loading(loading ina dvance) rather than lazy loading, its only used at those places where there are relationships, like here we had an author relationship.
+    result = await db.execute(
+        select(models.Post)
+        .options(selectinload(models.Post.author))
+        .order_by(models.Post.date_posted.desc()),
+    ) # selectinload enforces eager loading(loading ina dvance) rather than lazy loading, its only used at those places where there are relationships, like here we had an author relationship.
     posts = result.scalars().all()
     return templates.TemplateResponse(
         request,
@@ -103,6 +107,7 @@ async def user_posts_page(
         select(models.Post)
         .options(selectinload(models.Post.author))
         .where(models.Post.user_id == user_id)
+        .order_by(models.Post.date_posted.desc()),
     )
     posts = result.scalars().all()
     return templates.TemplateResponse(
